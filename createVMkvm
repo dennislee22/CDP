@@ -1,0 +1,119 @@
+D=/var/lib/libvirt/images
+IMAGE=/root/CentOS-7-x86_64-GenericCloud.qcow2
+VM=bmaster1
+DOMAIN=xxx.yyy
+MEMORY=262144
+VCPU=16
+SIZE=300G
+IP=x.x.x.x
+DNS=x.x.x.x
+SUBNET=xx
+GW=x.x.x.x
+
+cd $D/$VM
+rm -v meta-data user-data $VM-cidata.iso
+virsh destroy $VM
+virsh undefine $VM
+virsh pool-destroy $VM
+
+mkdir -vp $D/$VM
+
+cd $D/$VM
+cat <<EOT >> meta-data 
+network-interfaces: |
+  iface eth0 inet static
+  address $IP
+  subnet $SUBNET
+  gateway $GW
+EOT
+
+cat <<EOT >> user-data
+#cloud-config
+ 
+# Hostname management
+preserve_hostname: False
+hostname: $VM
+fqdn: $VM.$DOMAIN
+
+debug: True
+ssh_pwauth: True
+disable_root: false
+
+ntp:
+  enabled: true
+  ntp_client: chrony  # Uses cloud-init default chrony configuration
+  pools: [server 0.centos.pool.ntp.org, server 1.centos.pool.ntp.org]
+
+# Configure where output will go
+output:
+  all: ">> /var/log/cloud-init.log"
+ 
+# configure interaction with ssh server
+ssh_genkeytypes: ['ssh-rsa', 'rsa']
+ 
+# Install my public ssh key to the first user-defined user configured
+# in cloud.cfg in the template (which is centos for CentOS cloud images)
+ssh_authorized_keys:
+  - ssh-rsa AAAAB3NzaC1yc2EA....
+# set timezone for VM
+timezone: Asia/Singapore
+
+runcmd:
+  - [ sed, -i, -e, "s/ONBOOT=no/ONBOOT=yes/", /etc/sysconfig/network-scripts/ifcfg-eth0 ]
+  - echo "search $DOMAIN" > /etc/resolv.conf
+  - echo "nameserver $DNS" >> /etc/resolv.conf
+  - echo "nameserver x.x.x.x" >> /etc/resolv.conf
+  - echo "$IP $VM.$DOMAIN $VM" >> /etc/hosts
+  - sed -i 's/enforcing/disabled/g' /etc/selinux/config /etc/selinux/config
+  - [ ifdown, eth0 ]
+  - [ ifup, eth0 ]
+  - [ yum, -y, update ]
+  - yum install krb5-workstation krb5-libs freeipa-client java-11-openjdk-devel -y
+  - [ yum, -y, remove, cloud-init ]
+  - mkdir /zookeeper1
+  - mkdir /journalnode1
+  - mkdir /namenode1
+  - echo "/dev/vdb /namenode1 xfs defaults 0 0" >> /etc/fstab
+  - echo "/dev/vdc /journalnode1 xfs defaults 0 0" >> /etc/fstab
+  - echo "/dev/vdd /zookeeper1 xfs defaults 0 0" >> /etc/fstab
+  - mkfs -t xfs -f /dev/vdb
+  - mkfs -t xfs -f /dev/vdc
+  - mkfs -t xfs -f /dev/vdd
+  - echo "x.x.x.x bmaster1.xxx.yyy bmaster1" >> /etc/hosts
+  - echo "x.x.x.x butility1.xxx.yyy butility1" >> /etc/hosts
+  - echo "x.x.x.x bgateway1.xxx.yyy bgateway1" >> /etc/hosts
+  - echo "x.x.x.x bworker1.xxx.yyy bworker1" >> /etc/hosts
+  - echo "x.x.x.x bmaster2.xxx.yyy bmaster2" >> /etc/hosts
+  - echo "x.x.x.x butility2.xxx.yyy butility2" >> /etc/hosts
+  - echo "x.x.x.x bgateway2.xxx.yyy bgateway2" >> /etc/hosts
+  - echo "x.x.x.x bworker2.xxx.yyy bworker2" >> /etc/hosts
+  - echo "x.x.x.x bmaster3.xxx.yyy bmaster3" >> /etc/hosts
+  - echo "x.x.x.x butility3.xxx.yyy butility3" >> /etc/hosts
+  - echo "x.x.x.x bgateway3.xxx.yyy bgateway3" >> /etc/hosts
+  - echo "x.x.x.x bworker3.xxx.yyy bworker3" >> /etc/hosts
+  - echo "x.x.x.x console-cdp.apps.ecs1.xxx.yyy" >> /etc/hosts
+  - reboot
+EOT
+
+cloud-init devel schema --config-file user-data
+
+cd $D/$VM
+cp -v $IMAGE $VM.qcow2
+
+qemu-img create -f qcow2 -o preallocation=metadata $VM.new.image $SIZE
+virt-resize --quiet --expand /dev/sda1 $VM.qcow2 $VM.new.image
+mv -f $VM.new.image $VM.qcow2
+ls -l
+
+virsh pool-create-as --name $VM --type dir --target $D/$VM
+
+virt-customize --add  $VM.qcow2 --root-password password:zzz
+
+cloud-localds $VM-cidata.iso user-data meta-data
+
+virt-install --import --name $VM --memory $MEMORY --vcpus $VCPU --cpu host --disk $VM.qcow2,format=qcow2,bus=virtio --network bridge=br0,model=virtio --os-variant=rhel7.9 --disk $VM-cidata.iso,device=cdrom --disk path=/dev/xxx,format=raw --disk path=/dev/xxx,format=raw --disk path=/dev/xxx,format=raw --graphics spice --noautoconsole
+
+virsh change-media $VM sda --eject --config
+rm -v meta-data user-data
+
+echo "Please wait for 10mins for yum install to complete inside this VM"
